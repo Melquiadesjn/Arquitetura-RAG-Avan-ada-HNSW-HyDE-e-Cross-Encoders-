@@ -292,3 +292,158 @@ class CrossEncoderReranker:
             reverse=True,
         )
         return reranked[:top_k]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline orquestrador
+# ---------------------------------------------------------------------------
+class AdvancedRAGPipeline:
+    """
+    Orquestra os quatro passos do pipeline RAG avançado:
+      1. Indexação HNSW
+      2. HyDE (query transformation)
+      3. Bi-Encoder retrieval (Top-10)
+      4. Cross-Encoder re-ranking (Top-3)
+    """
+
+    def __init__(self, api_key: str | None) -> None:
+        if not api_key or not api_key.strip():
+            raise ValueError(
+                "OPENAI_API_KEY não encontrada. "
+                "Copie .env.example para .env e preencha sua chave de API."
+            )
+        validated_key: str = api_key  # narrowing explícito: str | None → str após guard
+        self._openai_client = OpenAI(api_key=validated_key)
+        self._index = HNSWIndex(client=self._openai_client)
+        self._hyde = HyDETransformer(client=self._openai_client)
+        self._reranker = CrossEncoderReranker()
+
+    # ------------------------------------------------------------------
+    # Passo 1 — Indexação
+    # ------------------------------------------------------------------
+    def build_index(self, documents: list[dict[str, str]]) -> None:
+        """Constrói o índice HNSW com os documentos do corpus."""
+        self._index.build(documents)
+
+    # ------------------------------------------------------------------
+    # Passos 2-4 — Execução completa do pipeline de recuperação
+    # ------------------------------------------------------------------
+    def run(self, user_query: str) -> list[RetrievedDocument]:
+        """
+        Executa o pipeline completo para uma query do usuário.
+
+        Args:
+            user_query: Pergunta em linguagem natural/coloquial (não vazia).
+
+        Returns:
+            Top-3 documentos mais relevantes após re-ranking pelo
+            Cross-Encoder, prontos para injeção no contexto do LLM gerador.
+        """
+        if not user_query or not user_query.strip():
+            raise ValueError("user_query não pode ser vazia.")
+
+        # ── Passo 2: HyDE ────────────────────────────────────────────────
+        print(f"\n{_SEP_SINGLE}")
+        print("PASSO 2 — HyDE: Transformação da Query")
+        print(_SEP_SINGLE)
+        hypothetical_doc = self._hyde.generate_hypothetical_document(user_query)
+        print(f"Query original  : {user_query}")
+        print("\nDocumento hipotético gerado pelo LLM:\n")
+        print(textwrap.fill(hypothetical_doc, width=70))
+
+        # ── Passo 2b: Vetorizar documento hipotético ─────────────────────
+        hyde_embedding = self._index.embed_single(hypothetical_doc)
+
+        # ── Passo 3: Bi-Encoder retrieval via HNSW ───────────────────────
+        print(f"\n{_SEP_SINGLE}")
+        print(f"PASSO 3 — Bi-Encoder: Top-{TOP_K_RETRIEVE} via HNSW")
+        print(_SEP_SINGLE)
+        top_candidates = self._index.query(
+            query_embedding=hyde_embedding,
+            n_results=TOP_K_RETRIEVE,
+        )
+
+        if not top_candidates:
+            logger.warning("Nenhum documento recuperado para a query: '%s'", user_query)
+            return []
+
+        print(f"\n{'#':>3}  {'Score Cosseno':>14}  Título")
+        print(_SEP_SINGLE)
+        for rank, doc in enumerate(top_candidates, start=1):
+            print(f"{rank:>3}  {doc.cosine_score:>14.4f}  {doc.title}")
+
+        # ── Passo 4: Cross-Encoder re-ranking ────────────────────────────
+        print(f"\n{_SEP_SINGLE}")
+        print(f"PASSO 4 — Cross-Encoder: Top-{TOP_K_RERANK} após re-ranking")
+        print(_SEP_SINGLE)
+        top_results = self._reranker.rerank(
+            query=user_query,
+            documents=top_candidates,
+            top_k=TOP_K_RERANK,
+        )
+
+        print(f"\n{'#':>3}  {'Score CE':>10}  {'Score Cos':>10}  Título")
+        print(_SEP_SINGLE)
+        for rank, doc in enumerate(top_results, start=1):
+            if doc.rerank_score is None:
+                raise RuntimeError(
+                    f"rerank_score não preenchido para: {doc.doc_id}"
+                )
+            print(
+                f"{rank:>3}  {doc.rerank_score:>10.4f}  "
+                f"{doc.cosine_score:>10.4f}  {doc.title}"
+            )
+
+        print(f"\n{_SEP_SINGLE}")
+        print("DOCUMENTOS FINAIS — Prontos para injeção no contexto do LLM")
+        print(_SEP_SINGLE)
+        for rank, doc in enumerate(top_results, start=1):
+            # rerank_score já verificado no loop acima — seguro acessar.
+            score = doc.rerank_score
+            assert score is not None  # satisfaz o type checker
+            print(f"\n[{rank}] {doc.title}")
+            print(f"    Score Cross-Encoder : {score:.4f}")
+            print(f"    Score Cosseno       : {doc.cosine_score:.4f}")
+            print("    Trecho              :")
+            print(textwrap.fill(doc.text, width=66, initial_indent="    "))
+
+        return top_results
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """Demonstra o pipeline com duas queries coloquiais de exemplo."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # Env var tem precedência; fallback para a constante do módulo.
+    # `or` garante que string vazia no ambiente não mascare a constante.
+    api_key = os.getenv("OPENAI_API_KEY") or OPENAI_API_KEY
+
+    pipeline = AdvancedRAGPipeline(api_key=api_key)
+
+    # ── Passo 1: Indexação ────────────────────────────────────────────────
+    print(f"\n{_SEP_DOUBLE}")
+    print("PASSO 1 — Construção e Indexação do Grafo HNSW")
+    print(_SEP_DOUBLE)
+    pipeline.build_index(MEDICAL_DOCUMENTS)
+    print(f"Total de documentos indexados: {len(MEDICAL_DOCUMENTS)}")
+
+    # Query 1 — exemplifica o problema semântico descrito no enunciado
+    pipeline.run(
+        "dor de cabeça latejante, luz incomodando e enjoo quando me mexo"
+    )
+
+    # Query 2 — demonstra versatilidade do pipeline
+    pipeline.run(
+        "meu coração dispara do nada e eu desmaio, médico falou algo de arritmia"
+    )
+
+
+if __name__ == "__main__":
+    main()
