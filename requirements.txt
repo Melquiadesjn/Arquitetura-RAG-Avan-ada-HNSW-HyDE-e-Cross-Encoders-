@@ -1,0 +1,17 @@
+# Laboratório 09 — RAG Avançada
+# Testado com Python 3.11+
+
+# LLM & Embeddings
+openai>=1.35.0
+
+# Banco vetorial com suporte nativo a HNSW
+chromadb>=0.5.0
+
+# Cross-Encoder para re-ranking
+sentence-transformers>=3.0.0
+
+# Manipulação de arrays (np.atleast_1d no reranker)
+numpy>=1.26.0
+
+# Variáveis de ambiente
+python-dotenv>=1.0.0
