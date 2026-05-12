@@ -176,3 +176,119 @@ class HNSWIndex:
     def embed_single(self, text: str) -> list[float]:
         """Vetoriza um único texto e retorna seu vetor denso."""
         return self._embed([text])[0]
+
+
+# ---------------------------------------------------------------------------
+# Passo 2: Query Transformation — HyDE
+# ---------------------------------------------------------------------------
+class HyDETransformer:
+    """
+    Hypothetical Document Embeddings (HyDE).
+
+    Em vez de vetorizar a query coloquial do usuário diretamente, pedimos
+    ao LLM que "alucine" um documento técnico que responderia à pergunta.
+    O vetor desse documento hipotético serve de âncora geométrica no espaço
+    dos manuais médicos — eliminando a lacuna semântica entre linguagem
+    coloquial e jargão clínico.
+    """
+
+    _SYSTEM_PROMPT = (
+        "Você é um médico especialista redator de manuais clínicos. "
+        "Dado um sintoma ou queixa relatada por um paciente em linguagem coloquial, "
+        "escreva um parágrafo técnico de 80 a 120 palavras — como se fosse um "
+        "fragmento de um manual médico — descrevendo a condição correspondente "
+        "usando terminologia clínica precisa (CID-10, biomarcadores, escalas "
+        "diagnósticas, protocolos). NÃO faça diagnóstico definitivo. "
+        "Responda APENAS com o parágrafo, sem introdução ou conclusão."
+    )
+
+    def __init__(self, client: OpenAI) -> None:
+        self._openai = client
+
+    def generate_hypothetical_document(self, user_query: str) -> str:
+        """
+        Gera um documento técnico hipotético a partir da query do usuário.
+
+        Args:
+            user_query: Pergunta ou sintoma em linguagem natural/coloquial.
+
+        Returns:
+            Texto técnico gerado pelo LLM (documento hipotético).
+        """
+        logger.info("HyDE — gerando documento hipotético para: '%s'", user_query)
+
+        response = self._openai.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": self._SYSTEM_PROMPT},
+                {"role": "user", "content": user_query},
+            ],
+            temperature=0.3,
+            max_tokens=300,
+        )
+        content = response.choices[0].message.content
+        if content is None:
+            raise RuntimeError(
+                "O LLM não retornou conteúdo (finish_reason pode ser 'content_filter')."
+            )
+        hypothetical_doc = content.strip()
+        if not hypothetical_doc:
+            raise RuntimeError("O LLM retornou conteúdo vazio após strip().")
+        logger.info("Documento hipotético gerado (%d chars).", len(hypothetical_doc))
+        return hypothetical_doc
+
+
+# ---------------------------------------------------------------------------
+# Passo 4: Re-ranking fino via Cross-Encoder
+# ---------------------------------------------------------------------------
+class CrossEncoderReranker:
+    """
+    Re-ranker baseado em Cross-Encoder (modelo de atenção bilateral).
+
+    Diferente do Bi-Encoder (que gera embeddings independentes), o
+    Cross-Encoder processa query + documento juntos ([CLS] Query [SEP] Doc),
+    permitindo atenção cruzada e scores de relevância muito mais precisos,
+    ao custo de latência maior — por isso aplicado apenas nos Top-10.
+    """
+
+    def __init__(self, model_name: str = CROSS_ENCODER_MODEL) -> None:
+        logger.info("Carregando Cross-Encoder: %s ...", model_name)
+        self._model = CrossEncoder(model_name)
+        logger.info("Cross-Encoder carregado com sucesso.")
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[RetrievedDocument],
+        top_k: int = TOP_K_RERANK,
+    ) -> list[RetrievedDocument]:
+        """
+        Pontua e re-ordena documentos usando atenção profunda bilateral.
+
+        Args:
+            query: Query ORIGINAL do usuário (não o documento hipotético HyDE).
+            documents: Lista de RetrievedDocument vindos do Bi-Encoder.
+                Nota: os objetos são mutados in-place com o campo rerank_score.
+            top_k: Número de documentos a retornar após re-ranking.
+
+        Returns:
+            Top-k documentos re-ordenados pelo score do Cross-Encoder.
+        """
+        if not documents:
+            return []
+
+        pairs = [(query, doc.text) for doc in documents]
+        # predict() retorna ndarray quando len(pairs) > 1 e float escalar
+        # quando len == 1; np.atleast_1d normaliza ambos os casos.
+        raw_scores: list[float] = np.atleast_1d(self._model.predict(pairs)).tolist()
+
+        for doc, score in zip(documents, raw_scores):
+            doc.rerank_score = round(score, 4)
+
+        # Todos os rerank_score foram preenchidos acima — o cast é seguro.
+        reranked = sorted(
+            documents,
+            key=lambda d: d.rerank_score,  # type: ignore[return-value]
+            reverse=True,
+        )
+        return reranked[:top_k]
