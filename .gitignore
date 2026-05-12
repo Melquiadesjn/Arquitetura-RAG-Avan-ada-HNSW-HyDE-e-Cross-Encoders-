@@ -1,0 +1,36 @@
+# Segredos — NUNCA versionar
+.env
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Dados locais do ChromaDB (gerados em runtime)
+chroma_db/
+*.sqlite3
+
+# Modelos baixados pelo sentence-transformers
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
