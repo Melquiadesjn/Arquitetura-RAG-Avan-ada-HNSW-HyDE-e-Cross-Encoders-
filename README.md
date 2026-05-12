@@ -214,9 +214,48 @@ A saída no console mostrará, de forma estruturada:
 
 ---
 
-## 8. Declaração de Uso de IA
+## 8. Validação Técnica
+
+### 8.1 Fórmula de similaridade de cosseno — verificação empírica
+
+A conversão de distância ChromaDB para similaridade de cosseno foi verificada
+com vetores de referência de similaridade conhecida:
+
+```python
+# Vetores com similaridades de cosseno exatas:
+# [1,0] vs [1,0]  → cosine_sim =  1.0 (idênticos)
+# [1,0] vs [0,1]  → cosine_sim =  0.0 (ortogonais)
+# [1,0] vs [-1,0] → cosine_sim = -1.0 (opostos)
+
+# ChromaDB hnsw:space=cosine retorna:
+# identical : distance=0.000000  → 1 - d = 1.0  ✓
+# orthogonal: distance=1.000000  → 1 - d = 0.0  ✓
+# opposite  : distance=2.000000  → 1 - d = -1.0 ✓
+
+# Fórmula INCORRETA (1 - d/2) daria: 1.0, 0.5, 0.0 — errado para ortogonal/oposto
+cosine_similarity = round(1.0 - distance, 4)  # fórmula correta
+```
+
+### 8.2 Checklist de qualidade do código
+
+- [x] Sintaxe Python válida (`ast.parse`)
+- [x] Todos os métodos com type hints completos
+- [x] Nenhuma linha acima de 100 caracteres
+- [x] Nenhum `bare except`
+- [x] Nenhuma chave de API exposta no código-fonte
+- [x] `logging.basicConfig` apenas em `main()` (não polui módulos importadores)
+- [x] Guards para: `api_key` vazia, `user_query` vazia, `documents` vazia,
+  `content` None do LLM, `hypothetical_doc` vazio, `top_candidates` vazio
+- [x] `np.atleast_1d` para normalizar `predict()` escalar vs ndarray
+- [x] Imports de terceiros em ordem alfabética (PEP 8)
+- [x] `chromadb.EphemeralClient()` — API atual (não depreciada)
+
+---
+
+## 9. Declaração de Uso de IA
 
 > **"Partes deste laboratório foram geradas/complementadas com IA, revisadas e validadas por Dimmy"**
+
 
 Especificamente:
 - Os **25 fragmentos do corpus médico** foram gerados com auxílio de IA generativa e revisados para garantir terminologia clínica correta (CID-10, biomarcadores, protocolos como ATLS, ARDSNet, Sepsis-3).
